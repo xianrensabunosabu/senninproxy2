@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Proxy Browser</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>🌐 senninProxy Browser</h1>
+    <button id="themeToggle">テーマ切り替え</button>
+  </header>
+
+  <div id="tab-bar"></div>
+  <div id="controls">
+    <button id="backBtn">←</button>
+    <button id="forwardBtn">→</button>
+    <input type="text" id="urlInput" placeholder="Enter URL (https://example.com)">
+    <button id="goBtn">Go</button>
+    <button id="newTab">＋</button>
+    <button id="delTab">🗑️</button>
+    <button id="bookmark">⭐</button>
+  </div>
+
+  <div id="iframe-container"></div>
+
+  <div id="bookmarks">
+    <h2>ブックマーク</h2>
+    <ul id="bookmarkList"></ul>
+  </div>
+
+<script>
+let tabs = [];
+let currentTab = null;
+
+// ---------- タブ操作 ----------
+function createTab(url="") {
+  const id = Date.now().toString();
+  tabs.push({ id, url, history: url ? [url] : [], index: url ? 0 : -1 });
+  const tabBtn = document.createElement("button");
+  tabBtn.textContent = "Tab " + tabs.length;
+  tabBtn.onclick = () => switchTab(id);
+  tabBtn.dataset.id = id;
+  document.getElementById("tab-bar").appendChild(tabBtn);
+
+  const iframe = document.createElement("iframe");
+  iframe.id = "iframe-" + id;
+  iframe.classList.add("tab-frame");
+  iframe.src = url ? "/proxy?url=" + encodeURIComponent(url) : "";
+  document.getElementById("iframe-container").appendChild(iframe);
+
+  switchTab(id);
+}
+
+function switchTab(id) {
+  currentTab = id;
+  document.querySelectorAll(".tab-frame").forEach(f => f.style.display = "none");
+  document.getElementById("iframe-" + id).style.display = "block";
+  document.querySelectorAll("#tab-bar button").forEach(b => b.classList.remove("active"));
+  document.querySelector(`#tab-bar button[data-id='${id}']`).classList.add("active");
+  updateURLBar();
+}
+
+function deleteCurrentTab() {
+  if (!currentTab) return;
+  document.getElementById("iframe-" + currentTab).remove();
+  document.querySelector(`#tab-bar button[data-id='${currentTab}']`).remove();
+  tabs = tabs.filter(t => t.id !== currentTab);
+  currentTab = tabs.length ? tabs[tabs.length-1].id : null;
+  if (currentTab) switchTab(currentTab);
+}
+
+// ---------- 履歴ナビゲーション ----------
+function goToURL() {
+  const url = document.getElementById("urlInput").value;
+  if (!url || !currentTab) return;
+  const tab = tabs.find(t => t.id === currentTab);
+  tab.history = tab.history.slice(0, tab.index + 1);
+  tab.history.push(url);
+  tab.index++;
+  tab.url = url;
+  updateIframe();
+}
+
+function goBack() {
+  const tab = tabs.find(t => t.id === currentTab);
+  if (tab && tab.index > 0) {
+    tab.index--;
+    tab.url = tab.history[tab.index];
+    updateIframe();
+  }
+}
+
+function goForward() {
+  const tab = tabs.find(t => t.id === currentTab);
+  if (tab && tab.index < tab.history.length - 1) {
+    tab.index++;
+    tab.url = tab.history[tab.index];
+    updateIframe();
+  }
+}
+
+function updateIframe() {
+  const tab = tabs.find(t => t.id === currentTab);
+  const iframe = document.getElementById("iframe-" + currentTab);
+  iframe.src = "/proxy?url=" + encodeURIComponent(tab.url);
+  updateURLBar();
+}
+
+function updateURLBar() {
+  const tab = tabs.find(t => t.id === currentTab);
+  document.getElementById("urlInput").value = tab ? (tab.url || "") : "";
+}
+
+// ---------- ブックマーク ----------
+function saveBookmark() {
+  const tab = tabs.find(t => t.id === currentTab);
+  if (!tab || !tab.url) return;
+  const bookmarks = JSON.parse(localStorage.getItem("bookmarks") || "[]");
+  if (!bookmarks.includes(tab.url)) bookmarks.push(tab.url);
+  localStorage.setItem("bookmarks", JSON.stringify(bookmarks));
+  loadBookmarks();
+}
+
+function loadBookmarks() {
+  const list = document.getElementById("bookmarkList");
+  list.innerHTML = "";
+  const bookmarks = JSON.parse(localStorage.getItem("bookmarks") || "[]");
+  bookmarks.forEach(url => {
+    const li = document.createElement("li");
+    li.textContent = url;
+    li.onclick = () => {
+      document.getElementById("urlInput").value = url;
+      goToURL();
+    };
+    list.appendChild(li);
+  });
+}
+
+// ---------- テーマ ----------
+document.getElementById("themeToggle").onclick = () => {
+  document.body.classList.toggle("dark");
+  localStorage.setItem("theme", document.body.classList.contains("dark") ? "dark" : "light");
+};
+
+// ---------- イベント ----------
+document.getElementById("newTab").onclick = () => createTab();
+document.getElementById("delTab").onclick = deleteCurrentTab;
+document.getElementById("goBtn").onclick = goToURL;
+document.getElementById("bookmark").onclick = saveBookmark;
+document.getElementById("backBtn").onclick = goBack;
+document.getElementById("forwardBtn").onclick = goForward;
+
+window.onload = () => {
+  createTab();
+  loadBookmarks();
+  if (localStorage.getItem("theme") === "dark") document.body.classList.add("dark");
+};
+</script>
+</body>
+</html>
