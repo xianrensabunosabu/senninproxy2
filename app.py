@@ -1,78 +1,111 @@
-from flask import Flask, request, render_template, jsonify, Response
+from flask import Flask, request, Response, render_template
 import requests
 from bs4 import BeautifulSoup
-import logging
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, quote
+from functools import lru_cache
 
 app = Flask(__name__)
 
-# --- ログを減らして静かに運用 ---
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
-# --- サーバーキャッシュ（簡易） ---
+# -------------------------------
+# メモリキャッシュ
+# -------------------------------
 cache = {}
 
-# --- ルート（UI） ---
-@app.route("/", methods=["GET", "HEAD"])
+def fetch_url(url, method="GET", data=None, headers=None):
+    if url in cache:
+        return cache[url]
+    try:
+        headers = headers or {"User-Agent": "Mozilla/5.0"}
+        if method=="POST":
+            resp = requests.post(url, data=data, headers=headers, timeout=10, verify=False)
+        else:
+            resp = requests.get(url, headers=headers, timeout=10, verify=False)
+        cache[url] = resp
+        return resp
+    except Exception as e:
+        print(f"[ERROR] fetch_url failed: {e}")
+        return None
+
+# -------------------------------
+# ルート
+# -------------------------------
+@app.route("/", methods=["GET","HEAD"])
 def index():
-    if request.method == "HEAD":
-        return "", 200  # Renderのヘルスチェック対応
+    if request.method=="HEAD":
+        return "", 200
     return render_template("index.html")
 
-# --- プロキシ経由でWebページ取得 ---
-@app.route("/proxy", methods=["GET", "POST"])
+# -------------------------------
+# プロキシ
+# -------------------------------
+@app.route("/proxy", methods=["GET","POST"])
 def proxy():
     target_url = request.args.get("url") or request.form.get("url")
     if not target_url:
-        return "Error: No URL provided", 400
+        return "<h3>Error: URL not specified</h3>", 400
 
-    # キャッシュ確認
-    if target_url in cache:
-        html = cache[target_url]
-        return Response(html, mimetype="text/html")
+    method = request.method
+    form_data = request.form if method=="POST" else None
 
-    try:
-        headers = {"User-Agent": request.headers.get("User-Agent", "ProxyBrowser/1.0")}
-        if request.method == "POST":
-            resp = requests.post(target_url, data=request.form, headers=headers, timeout=10)
-        else:
-            resp = requests.get(target_url, headers=headers, timeout=10)
+    resp = fetch_url(target_url, method, form_data)
+    if not resp:
+        return f"<pre>Failed to fetch {target_url}</pre>", 500
 
-        # HTML以外はそのまま返す（画像など）
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/html" not in content_type:
-            return Response(resp.content, mimetype=content_type)
+    content_type = resp.headers.get("Content-Type","")
 
-        # HTML書き換え
-        soup = BeautifulSoup(resp.text, "html.parser")
+    # HTMLの場合は書き換え
+    if "text/html" in content_type:
+        soup = BeautifulSoup(resp.text,"html.parser")
         base_tag = soup.new_tag("base", href=target_url)
         if soup.head:
             soup.head.insert(0, base_tag)
         else:
-            head = soup.new_tag("head")
-            head.insert(0, base_tag)
-            soup.insert(0, head)
+            soup.insert(0, base_tag)
 
-        # 相対リンクを絶対URLに
-        for tag in soup.find_all(["a", "img", "script", "link", "form"]):
-            for attr in ["href", "src", "action"]:
+        # 全リンク/フォーム/スクリプト/画像をサーバー経由
+        for tag in soup.find_all(["a","img","script","link","form"]):
+            for attr in ["href","src","action"]:
                 if tag.has_attr(attr):
-                    tag[attr] = urljoin(target_url, tag[attr])
+                    abs_url = urljoin(target_url, tag[attr])
+                    tag[attr] = '/proxy?url=' + quote(abs_url)
 
-        html = str(soup)
-        cache[target_url] = html
-        return Response(html, mimetype="text/html")
+        # fetch/XHR書き換え
+        inject_js="""
+<script>
+const originalFetch=window.fetch;
+window.fetch=function(url,options){
+  const proxyUrl='/proxy?url='+encodeURIComponent(new URL(url,location.href).href);
+  if(options&&options.method==='POST'){
+    return originalFetch(proxyUrl,{method:'POST',body:options.body});
+  }
+  return originalFetch(proxyUrl);
+};
+const origOpen=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(m,u,...r){
+  const proxyUrl='/proxy?url='+encodeURIComponent(new URL(u,location.href).href);
+  return origOpen.call(this,m,proxyUrl,...r);
+};
+</script>
+"""
+        if soup.body:
+            soup.body.append(BeautifulSoup(inject_js,"html.parser"))
+        else:
+            soup.append(BeautifulSoup(inject_js,"html.parser"))
 
-    except Exception as e:
-        return f"<h3>Proxy Error:</h3><pre>{e}</pre>", 500
+        return Response(str(soup), content_type="text/html; charset=utf-8")
 
+    # HTML以外（画像/動画/JS/CSS）はバイナリそのまま返す
+    response = Response(resp.content, content_type=content_type)
+    if resp.headers.get("Content-Length"):
+        response.headers["Content-Length"] = resp.headers["Content-Length"]
+    return response
 
-# --- ヘルスチェック用エンドポイント ---
-@app.route("/health", methods=["GET"])
+# -------------------------------
+# ヘルスチェック
+# -------------------------------
+@app.route("/health")
 def health():
-    return jsonify(status="ok"), 200
+    return "ok", 200
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__=="__main__":
+    app.run(host="0.0.0.0", port=5000)
