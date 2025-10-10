@@ -1,11 +1,14 @@
-    # app.py
 import os, time, logging
 from urllib.parse import urljoin, quote, urlparse
 
 import requests
-from flask import Flask, request, Response, render_template, abort
+from flask import Flask, request, Response, render_template
 from bs4 import BeautifulSoup
 from functools import wraps
+from dotenv import load_dotenv
+
+# ローカル開発用に .env を読み込む
+load_dotenv()
 
 # --- 設定 ---
 WHITELIST = {
@@ -14,15 +17,14 @@ WHITELIST = {
 }
 ADMIN_USER = os.environ.get("PB_USER", "admin")
 ADMIN_PASS = os.environ.get("PB_PASS", "password")
-CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))  # 秒
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
 CACHE_MAX = int(os.environ.get("CACHE_MAX", "200"))
 
 app = Flask(__name__)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 # --- TTLキャッシュ ---
-_cache = {}  # url -> {"time": ts, "resp": requests.Response}
-
+_cache = {}
 def cache_get(url):
     e = _cache.get(url)
     if not e: return None
@@ -42,7 +44,6 @@ def check_auth(username, password):
     return username == ADMIN_USER and password == ADMIN_PASS
 
 def requires_auth(f):
-    from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
@@ -79,7 +80,7 @@ def rewrite_html(target_url, text):
         for attr in ("href","src","action"):
             if tag.has_attr(attr):
                 val = tag[attr]
-                if not val or val.strip().lower().startswith("javascript:") or val.strip().lower().startswith("data:"):
+                if not val or val.strip().lower().startswith(("javascript:","data:")):
                     continue
                 try:
                     abs_url = urljoin(target_url, val)
@@ -150,4 +151,5 @@ def internal(e): return render_template("error.html",message="サーバー内部
 def health(): return "ok",200
 
 if __name__=="__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT","5000")), debug=False)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
