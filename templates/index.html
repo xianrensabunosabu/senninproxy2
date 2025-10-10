@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>教育用 Proxy Browser</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="controls">
+    <input id="urlInput" placeholder="https://example.com">
+    <button id="goBtn">Go</button>
+  </div>
+</header>
+
+<div id="loader" class="loader-wrap" aria-hidden="true">
+  <div class="spinner"></div>
+  <div class="loader-text">読み込み中…</div>
+</div>
+
+<iframe id="viewFrame" sandbox="allow-scripts allow-forms"></iframe>
+
+<script>
+const frame=document.getElementById('viewFrame');
+const loader=document.getElementById('loader');
+const urlInput=document.getElementById('urlInput');
+
+function showLoader(){loader.style.display='flex'; frame.style.display='none';}
+function hideLoader(){loader.style.display='none'; frame.style.display='block';}
+
+document.getElementById('goBtn').addEventListener('click',()=>load(urlInput.value));
+urlInput.addEventListener('keydown', e=>{if(e.key==='Enter') load(urlInput.value);});
+
+function normalize(u){if(!u) return ''; if(!u.match(/^https?:\/\//)) u='https://'+u; return u;}
+function load(raw){
+  const u=normalize(raw);
+  if(!u) return;
+  showLoader();
+  frame.src='/proxy?url='+encodeURIComponent(u);
+}
+frame.onload=()=>hideLoader();
+</script>
+</body>
+</html>
