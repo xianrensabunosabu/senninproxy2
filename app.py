@@ -1,111 +1,153 @@
-from flask import Flask, request, Response, render_template
+    # app.py
+import os, time, logging
+from urllib.parse import urljoin, quote, urlparse
+
 import requests
+from flask import Flask, request, Response, render_template, abort
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, quote
-from functools import lru_cache
+from functools import wraps
+
+# --- 設定 ---
+WHITELIST = {
+    "example.com",
+    "www.example.com",
+}
+ADMIN_USER = os.environ.get("PB_USER", "admin")
+ADMIN_PASS = os.environ.get("PB_PASS", "password")
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))  # 秒
+CACHE_MAX = int(os.environ.get("CACHE_MAX", "200"))
 
 app = Flask(__name__)
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-# -------------------------------
-# メモリキャッシュ
-# -------------------------------
-cache = {}
+# --- TTLキャッシュ ---
+_cache = {}  # url -> {"time": ts, "resp": requests.Response}
 
-def fetch_url(url, method="GET", data=None, headers=None):
-    if url in cache:
-        return cache[url]
-    try:
-        headers = headers or {"User-Agent": "Mozilla/5.0"}
-        if method=="POST":
-            resp = requests.post(url, data=data, headers=headers, timeout=10, verify=False)
-        else:
-            resp = requests.get(url, headers=headers, timeout=10, verify=False)
-        cache[url] = resp
-        return resp
-    except Exception as e:
-        print(f"[ERROR] fetch_url failed: {e}")
+def cache_get(url):
+    e = _cache.get(url)
+    if not e: return None
+    if time.time() - e["time"] > CACHE_TTL:
+        _cache.pop(url, None)
         return None
+    return e["resp"]
 
-# -------------------------------
-# ルート
-# -------------------------------
+def cache_set(url, resp):
+    if len(_cache) >= CACHE_MAX:
+        oldest = min(_cache.items(), key=lambda kv: kv[1]["time"])[0]
+        _cache.pop(oldest, None)
+    _cache[url] = {"time": time.time(), "resp": resp}
+
+# --- Basic認証 ---
+def check_auth(username, password):
+    return username == ADMIN_USER and password == ADMIN_PASS
+
+def requires_auth(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return Response(
+                "認証が必要です", 401,
+                {"WWW-Authenticate": 'Basic realm="Login Required"'}
+            )
+        return f(*args, **kwargs)
+    return decorated
+
+# --- ホワイトリスト判定 ---
+def is_whitelisted(target_url):
+    try:
+        host = urlparse(target_url).hostname
+        return host in WHITELIST
+    except Exception:
+        return False
+
+# --- 安全取得 ---
+def safe_fetch(url, method="GET", data=None):
+    headers = {"User-Agent": "EducationalProxy/1.0"}
+    if method=="POST":
+        return requests.post(url, data=data, headers=headers, timeout=15, verify=True)
+    return requests.get(url, headers=headers, timeout=15, verify=True)
+
+# --- HTML書き換え ---
+def rewrite_html(target_url, text):
+    soup = BeautifulSoup(text, "html.parser")
+    base_tag = soup.new_tag("base", href=target_url)
+    if soup.head: soup.head.insert(0, base_tag)
+    else: soup.insert(0, base_tag)
+    for tag in soup.find_all(["a","img","script","link","form"]):
+        for attr in ("href","src","action"):
+            if tag.has_attr(attr):
+                val = tag[attr]
+                if not val or val.strip().lower().startswith("javascript:") or val.strip().lower().startswith("data:"):
+                    continue
+                try:
+                    abs_url = urljoin(target_url, val)
+                    tag[attr] = "/proxy?url=" + quote(abs_url, safe="")
+                except Exception:
+                    continue
+    inject = """
+<script>
+(function(){
+  const origFetch=window.fetch;
+  window.fetch=function(url,options){
+    try{
+      const abs=new URL(url,location.href).href;
+      const p='/proxy?url='+encodeURIComponent(abs);
+      if(options && options.method && options.method.toUpperCase()==='POST') return origFetch(p,{method:'POST',body:options.body});
+      return origFetch(p);
+    } catch(e){ return origFetch(url,options);}
+  };
+  const origOpen=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u,...r){
+    try{ const abs=new URL(u,location.href).href; const p='/proxy?url='+encodeURIComponent(abs); return origOpen.call(this,m,p,...r);}
+    catch(e){ return origOpen.call(this,m,u,...r);}
+  };
+})();
+</script>
+"""
+    if soup.body: soup.body.append(BeautifulSoup(inject,"html.parser"))
+    else: soup.append(BeautifulSoup(inject,"html.parser"))
+    return str(soup)
+
+# --- ルート ---
 @app.route("/", methods=["GET","HEAD"])
 def index():
-    if request.method=="HEAD":
-        return "", 200
+    if request.method=="HEAD": return "", 200
     return render_template("index.html")
 
-# -------------------------------
-# プロキシ
-# -------------------------------
+# --- プロキシ ---
 @app.route("/proxy", methods=["GET","POST"])
+@requires_auth
 def proxy():
     target_url = request.args.get("url") or request.form.get("url")
     if not target_url:
-        return "<h3>Error: URL not specified</h3>", 400
-
-    method = request.method
-    form_data = request.form if method=="POST" else None
-
-    resp = fetch_url(target_url, method, form_data)
-    if not resp:
-        return f"<pre>Failed to fetch {target_url}</pre>", 500
-
-    content_type = resp.headers.get("Content-Type","")
-
-    # HTMLの場合は書き換え
+        return render_template("error.html", message="URLが指定されていません。"),400
+    if not is_whitelisted(target_url):
+        return render_template("error.html", message="このドメインは許可されていません。"),403
+    cached = cache_get(target_url)
+    if cached is not None: resp = cached
+    else:
+        try:
+            if request.method=="POST": resp=safe_fetch(target_url,"POST",request.form)
+            else: resp=safe_fetch(target_url)
+            if resp.status_code==200: cache_set(target_url,resp)
+        except requests.RequestException as e:
+            return render_template("error.html",message=f"サイト取得に失敗しました:{e}"),502
+    content_type=resp.headers.get("Content-Type","")
     if "text/html" in content_type:
-        soup = BeautifulSoup(resp.text,"html.parser")
-        base_tag = soup.new_tag("base", href=target_url)
-        if soup.head:
-            soup.head.insert(0, base_tag)
-        else:
-            soup.insert(0, base_tag)
-
-        # 全リンク/フォーム/スクリプト/画像をサーバー経由
-        for tag in soup.find_all(["a","img","script","link","form"]):
-            for attr in ["href","src","action"]:
-                if tag.has_attr(attr):
-                    abs_url = urljoin(target_url, tag[attr])
-                    tag[attr] = '/proxy?url=' + quote(abs_url)
-
-        # fetch/XHR書き換え
-        inject_js="""
-<script>
-const originalFetch=window.fetch;
-window.fetch=function(url,options){
-  const proxyUrl='/proxy?url='+encodeURIComponent(new URL(url,location.href).href);
-  if(options&&options.method==='POST'){
-    return originalFetch(proxyUrl,{method:'POST',body:options.body});
-  }
-  return originalFetch(proxyUrl);
-};
-const origOpen=XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open=function(m,u,...r){
-  const proxyUrl='/proxy?url='+encodeURIComponent(new URL(u,location.href).href);
-  return origOpen.call(this,m,proxyUrl,...r);
-};
-</script>
-"""
-        if soup.body:
-            soup.body.append(BeautifulSoup(inject_js,"html.parser"))
-        else:
-            soup.append(BeautifulSoup(inject_js,"html.parser"))
-
-        return Response(str(soup), content_type="text/html; charset=utf-8")
-
-    # HTML以外（画像/動画/JS/CSS）はバイナリそのまま返す
-    response = Response(resp.content, content_type=content_type)
-    if resp.headers.get("Content-Length"):
-        response.headers["Content-Length"] = resp.headers["Content-Length"]
+        try: return Response(rewrite_html(target_url,resp.text), content_type="text/html; charset=utf-8")
+        except Exception as e: return render_template("error.html",message=f"HTML処理エラー:{e}"),500
+    response=Response(resp.content, content_type=content_type)
+    if resp.headers.get("Content-Length"): response.headers["Content-Length"]=resp.headers["Content-Length"]
     return response
 
-# -------------------------------
-# ヘルスチェック
-# -------------------------------
+@app.errorhandler(404)
+def notfound(e): return render_template("error.html",message="ページが見つかりません。"),404
+@app.errorhandler(500)
+def internal(e): return render_template("error.html",message="サーバー内部エラー。"),500
 @app.route("/health")
-def health():
-    return "ok", 200
+def health(): return "ok",200
 
 if __name__=="__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT","5000")), debug=False)
