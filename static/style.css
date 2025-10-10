@@ -1,0 +1,11 @@
+body{margin:0;font-family:system-ui, sans-serif;background:#0f1720;color:#e6eef6;}
+.topbar{background:#111;padding:10px;border-bottom:1px solid #333;}
+.controls{display:flex;gap:8px;max-width:900px;margin:0 auto;}
+.controls input{flex:1;padding:6px;border-radius:4px;border:1px solid #444;background:#111;color:#fff;}
+.controls button{padding:6px 10px;background:#36a3ff;border:none;color:#fff;border-radius:4px;cursor:pointer;}
+iframe#viewFrame{width:100%;height:calc(100vh - 50px);border:none;display:block;}
+.loader-wrap{position:fixed;left:0;top:50px;right:0;bottom:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:rgba(0,0,0,0.45);z-index:1000;}
+.spinner{width:48px;height:48px;border-radius:50%;border:6px solid rgba(255,255,255,0.08);border-top-color:#36a3ff;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.loader-text{color:#e6eef6;margin-top:12px;}
+.centered{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;}
